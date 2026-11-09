@@ -9,6 +9,7 @@ import org.json.JSONException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -37,7 +38,7 @@ final class MapsRoutes {
     record Result(String destination, List<Route> routes) {}
     private record Page(URL url, String body) {}
 
-    static Result load(String sharedText) throws IOException, JSONException {
+    static Result load(String sharedText, Runnable onPreviewRequest) throws IOException, JSONException {
         URL link = findLink(sharedText);
         Page directions = fetch(link, false);
         if (!directions.url().getPath().matches("/maps/dir(?:/.*)?")) {
@@ -48,6 +49,7 @@ final class MapsRoutes {
             throw new IOException("経路データが見つかりません。出発地と目的地が入った経路を共有してください。");
         }
         String path = preview.group(1).replace("&amp;", "&");
+        onPreviewRequest.run();
         return parse(fetch(new URL(directions.url(), path), true).body());
     }
 
@@ -73,6 +75,7 @@ final class MapsRoutes {
 
     private static Page fetch(URL url, boolean preview) throws IOException {
         for (int redirect = 0; redirect <= 5; redirect++) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
             if (!"https".equals(url.getProtocol()) || !allowedHost(url.getHost())
                     || url.getUserInfo() != null || url.getPort() != -1
                     || (preview && !"/maps/preview/directions".equals(url.getPath()))) {
@@ -100,6 +103,7 @@ final class MapsRoutes {
                     byte[] buffer = new byte[8192];
                     int count;
                     while ((count = input.read(buffer)) != -1) {
+                        if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
                         if (body.size() + count > MAX_BYTES) throw new IOException("経路データが大きすぎます。");
                         body.write(buffer, 0, count);
                     }

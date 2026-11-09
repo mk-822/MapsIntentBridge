@@ -28,6 +28,7 @@ import javax.net.ssl.HttpsURLConnection;
 final class RouteMapView extends View {
     private static final int TILE_SIZE = 256;
     private static final int[] COLORS = {0xff1557b0, 0xffa02971, 0xff087861, 0xffa64a00};
+    private static final int[] DARK_LABEL_COLORS = {0xff9bc8ff, 0xffffa8d5, 0xff82e6cc, 0xffffbf83};
     private static final String USER_AGENT =
             "MapsIntentBridge/1.0 (+https://github.com/mk-822/MapsIntentBridge)";
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -77,8 +78,12 @@ final class RouteMapView extends View {
         return index < 20 ? Character.toString((char) ('①' + index)) : "(" + (index + 1) + ")";
     }
 
-    static int color(int index) {
+    private static int color(int index) {
         return COLORS[index % COLORS.length];
+    }
+
+    static int labelColor(int index, boolean dark) {
+        return dark ? DARK_LABEL_COLORS[index % DARK_LABEL_COLORS.length] : color(index);
     }
 
     void select(int index) {

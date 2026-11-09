@@ -1,0 +1,7 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar" />
+    <style name="ShareTheme" parent="android:style/Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:backgroundDimAmount">0.32</item>
+    </style>
+</resources>

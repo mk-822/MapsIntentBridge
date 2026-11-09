@@ -4,12 +4,21 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.pm.ProviderInfo;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
-import android.content.res.ColorStateList;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -19,28 +28,37 @@ import org.json.JSONException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.SocketTimeoutException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
-public final class MainActivity extends Activity {
+public class MainActivity extends Activity {
     private static final int SAVE_GPX = 1;
+    private static final long LOAD_TIMEOUT_MS = 25_000;
+    private static final String TIMEOUT_MESSAGE = "Google マップからの応答が時間内に届きませんでした。";
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService routeWorker = Executors.newFixedThreadPool(2);
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService mapWorker = Executors.newSingleThreadExecutor();
     private LinearLayout content;
     private MapsRoutes.Result result;
-    private Uri gpx;
+    private Uri pendingSave;
+    private boolean popup;
+    private boolean dark;
+    private int loadAttempt;
 
     @Override protected void onCreate(Bundle state) {
-        super.onCreate(state);
-        if (state != null) {
-            String savedUri = state.getString("gpx");
-            if (savedUri != null) {
-                gpx = Uri.parse(savedUri);
-                showGpx(null, false);
-                return;
-            }
-        }
         Intent intent = getIntent();
+        popup = this instanceof ShareActivity;
+        dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        super.onCreate(state);
+        if (popup) setFinishOnTouchOutside(true);
+        if (state != null) {
+            String savedUri = state.getString("pendingSave");
+            if (savedUri != null) pendingSave = Uri.parse(savedUri);
+        }
         if (Intent.ACTION_SEND.equals(intent.getAction())) {
             CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
             if (text != null) {
@@ -53,32 +71,64 @@ public final class MainActivity extends Activity {
         line("共有リンクから経路候補を読み込み、GPX を作成して対応アプリで開けます。");
     }
 
+    @Override public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        sizePopup();
+    }
+
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
-        if (gpx != null) state.putString("gpx", gpx.toString());
+        if (pendingSave != null) state.putString("pendingSave", pendingSave.toString());
     }
 
     @Override protected void onDestroy() {
+        main.removeCallbacksAndMessages(null);
+        routeWorker.shutdownNow();
         worker.shutdownNow();
         mapWorker.shutdownNow();
         super.onDestroy();
     }
 
     private void load(String text) {
+        int attempt = ++loadAttempt;
         screen("経路を取得中");
-        line("Google マップの共有リンクを開いています。");
-        worker.execute(() -> {
+        TextView status = line("Google マップの共有リンクを開いています。");
+        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setIndeterminate(true);
+        content.addView(progress, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        Future<?> request = routeWorker.submit(() -> {
             try {
-                MapsRoutes.Result loaded = MapsRoutes.load(text);
-                onScreen(() -> {
+                MapsRoutes.Result loaded = MapsRoutes.load(text, () ->
+                        onScreen(() -> {
+                            if (attempt == loadAttempt) status.setText("経路候補をダウンロードしています。");
+                        }));
+                finishLoad(attempt, () -> {
                     result = loaded;
                     showRoutes();
                 });
             } catch (JSONException error) {
-                onScreen(() -> loadError(text, "Google マップの経路データ形式に対応できませんでした。"));
+                finishLoad(attempt, () -> loadError(text, "Google マップの経路データ形式に対応できませんでした。"));
+            } catch (SocketTimeoutException error) {
+                finishLoad(attempt, () -> loadError(text, TIMEOUT_MESSAGE));
             } catch (IOException error) {
-                onScreen(() -> loadError(text, error.getLocalizedMessage()));
+                finishLoad(attempt, () -> loadError(text, error.getLocalizedMessage()));
             }
+        });
+        main.postDelayed(() -> {
+            if (attempt != loadAttempt || isFinishing()) return;
+            loadAttempt++;
+            request.cancel(true);
+            loadError(text, TIMEOUT_MESSAGE);
+        }, LOAD_TIMEOUT_MS);
+    }
+
+    private void finishLoad(int attempt, Runnable render) {
+        onScreen(() -> {
+            if (attempt != loadAttempt) return;
+            main.removeCallbacksAndMessages(null);
+            loadAttempt++;
+            render.run();
         });
     }
 
@@ -89,14 +139,16 @@ public final class MainActivity extends Activity {
     }
 
     private void showRoutes() {
-        gpx = null;
         screen(result.destination());
-        line("共有リンクの経路候補を地図で確認できます。");
+        line("経路を選択してください");
         RouteMapView map = new RouteMapView(this, result.routes(), mapWorker);
         Button[] candidates = new Button[result.routes().size()];
         Button send = new Button(this);
+        Button save = new Button(this);
         send.setEnabled(false);
-        send.setText("経路を選択してください");
+        send.setText("GPX にして開く");
+        save.setEnabled(false);
+        save.setText("GPX ファイルに保存");
         for (int i = 0; i < candidates.length; i++) {
             int index = i;
             MapsRoutes.Route route = result.routes().get(i);
@@ -104,50 +156,53 @@ public final class MainActivity extends Activity {
                 for (int j = 0; j < candidates.length; j++) {
                     candidates[j].setSelected(j == index);
                     candidates[j].setBackgroundTintList(j == index
-                            ? ColorStateList.valueOf(0xffdceaff) : null);
+                            ? ColorStateList.valueOf(dark ? 0xff293f58 : 0xffdceaff) : null);
                 }
                 map.select(index);
                 send.setText(RouteMapView.number(index) + " を GPX にして開く");
+                save.setText(RouteMapView.number(index) + " を GPX ファイルに保存");
                 send.setEnabled(true);
-                send.setOnClickListener(view -> createGpx(route));
+                save.setEnabled(true);
+                send.setOnClickListener(view -> createGpx(route, candidates, send, save, false));
+                save.setOnClickListener(view -> createGpx(route, candidates, send, save, true));
             });
-            candidates[i].setTextColor(RouteMapView.color(i));
+            candidates[i].setTextColor(RouteMapView.labelColor(i, dark));
         }
         int mapHeight = Math.round(260 * getResources().getDisplayMetrics().density);
         content.addView(map, ViewGroup.LayoutParams.MATCH_PARENT, mapHeight);
         content.addView(send, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        content.addView(save, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         if (candidates.length == 1) candidates[0].performClick();
     }
 
-    private void createGpx(MapsRoutes.Route route) {
-        screen("GPX を作成中");
+    private void createGpx(MapsRoutes.Route route, Button[] candidates, Button send, Button save,
+                           boolean saveToFile) {
+        setRouteControlsEnabled(candidates, send, save, false);
         String name = result.destination() + "（" + route.road() + "）";
         worker.execute(() -> {
             try {
                 Uri created = GpxProvider.write(this, name, route.points());
                 onScreen(() -> {
-                    gpx = created;
-                    showGpx(route, true);
+                    setRouteControlsEnabled(candidates, send, save, true);
+                    if (saveToFile) saveGpx(created);
+                    else openGpx(created);
                 });
             } catch (IOException | RuntimeException error) {
                 onScreen(() -> {
-                    showRoutes();
+                    setRouteControlsEnabled(candidates, send, save, true);
                     toast("GPX を作成できませんでした。");
                 });
             }
         });
     }
 
-    private void showGpx(MapsRoutes.Route route, boolean open) {
-        screen("GPX を作成しました");
-        if (route != null) line(route.label() + "（" + route.points().size() + " 点）");
-        button("GPX を開く", this::openGpx);
-        button("GPX をファイルに保存", this::saveGpx);
-        if (result != null) button("経路の選択に戻る", this::showRoutes);
-        if (open) openGpx();
+    private static void setRouteControlsEnabled(Button[] candidates, Button send, Button save, boolean enabled) {
+        for (Button candidate : candidates) candidate.setEnabled(enabled);
+        send.setEnabled(enabled);
+        save.setEnabled(enabled);
     }
 
-    private void openGpx() {
+    private void openGpx(Uri gpx) {
         Intent view = new Intent(Intent.ACTION_VIEW)
                 .setDataAndType(gpx, GpxProvider.MIME)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -158,29 +213,39 @@ public final class MainActivity extends Activity {
         }
         try {
             startActivity(Intent.createChooser(view, "GPX を開くアプリを選択"));
+            finish();
         } catch (ActivityNotFoundException error) {
             toast("アプリの選択画面を開けませんでした。ファイルとして保存できます。");
         }
     }
 
-    private void saveGpx() {
+    private void saveGpx(Uri gpx) {
         Intent create = new Intent(Intent.ACTION_CREATE_DOCUMENT)
                 .addCategory(Intent.CATEGORY_OPENABLE)
                 .setType(GpxProvider.MIME)
                 .putExtra(Intent.EXTRA_TITLE, "Maps-route.gpx");
         try {
+            pendingSave = gpx;
             startActivityForResult(create, SAVE_GPX);
         } catch (ActivityNotFoundException error) {
+            pendingSave = null;
             toast("ファイルの保存画面を開けませんでした。");
         }
     }
 
     @Override protected void onActivityResult(int request, int code, Intent data) {
         super.onActivityResult(request, code, data);
-        if (request != SAVE_GPX || code != RESULT_OK || data == null || data.getData() == null || gpx == null) {
+        if (request != SAVE_GPX) return;
+        Uri source = pendingSave;
+        pendingSave = null;
+        if (code != RESULT_OK) {
+            finish();
             return;
         }
-        Uri source = gpx;
+        if (data == null || data.getData() == null || source == null) {
+            toast("GPX を保存できませんでした。");
+            return;
+        }
         Uri destination = data.getData();
         worker.execute(() -> {
             try (InputStream input = getContentResolver().openInputStream(source);
@@ -194,8 +259,36 @@ public final class MainActivity extends Activity {
                 onScreen(() -> toast("GPX を保存できませんでした。"));
                 return;
             }
-            onScreen(() -> toast("GPX を保存しました。"));
+            String location = savedLocation(destination);
+            onScreen(() -> {
+                toast("保存先 " + location);
+                finish();
+            });
         });
+    }
+
+    private String savedLocation(Uri destination) {
+        String authority = destination.getAuthority();
+        if (DocumentsContract.isDocumentUri(this, destination)) {
+            String id = DocumentsContract.getDocumentId(destination);
+            if ("com.android.externalstorage.documents".equals(authority) && id.startsWith("primary:")) {
+                return "内部ストレージ/" + id.substring("primary:".length());
+            }
+            if ("com.android.providers.downloads.documents".equals(authority) && id.startsWith("raw:")) {
+                return id.substring("raw:".length());
+            }
+        }
+
+        String name = null;
+        try (Cursor cursor = getContentResolver().query(destination,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+        } catch (RuntimeException ignored) {
+            // Some providers do not expose the display name.
+        }
+        ProviderInfo provider = authority == null ? null : getPackageManager().resolveContentProvider(authority, 0);
+        if (provider != null && name != null) return provider.loadLabel(getPackageManager()) + "/" + name;
+        return name != null ? name : destination.toString();
     }
 
     private void onScreen(Runnable action) {
@@ -212,8 +305,17 @@ public final class MainActivity extends Activity {
         content.setPadding(padding, padding, padding, padding);
         scroll.addView(content);
         setContentView(scroll);
+        sizePopup();
         TextView heading = line(title);
         heading.setTextSize(24);
+    }
+
+    private void sizePopup() {
+        if (!popup) return;
+        int screenWidth = getResources().getConfiguration().screenWidthDp;
+        float density = getResources().getDisplayMetrics().density;
+        int width = Math.round(Math.min(560, screenWidth * 0.95f) * density);
+        getWindow().setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
     private TextView line(String value) {
