@@ -8,6 +8,7 @@
     </queries>
 
     <application android:label="Maps Intent Bridge"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false">
         <activity android:name=".MainActivity" android:exported="true"
