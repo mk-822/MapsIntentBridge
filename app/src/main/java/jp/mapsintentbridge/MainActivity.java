@@ -8,6 +8,7 @@ import android.content.pm.ProviderInfo;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -139,10 +140,23 @@ public class MainActivity extends Activity {
     }
 
     private void showRoutes() {
-        screen(result.destination());
-        line("経路を選択してください");
+        TextView heading = screen(result.destination());
+        TextView instruction = line("経路を選択してください");
         RouteMapView map = new RouteMapView(this, result.routes(), mapWorker);
+        float density = getResources().getDisplayMetrics().density;
+        // The standard button draws its face inside its view bounds.
+        int buttonSideInset = Math.round(4 * density);
+        int gapAdjustment = Math.round(6 * density);
+        heading.setPaddingRelative(buttonSideInset, 0, buttonSideInset, heading.getPaddingBottom());
+        instruction.setPaddingRelative(buttonSideInset, 0, buttonSideInset, instruction.getPaddingBottom());
+        Drawable pin = getDrawable(R.drawable.destination_pin).mutate();
+        pin.setTint(heading.getCurrentTextColor());
+        heading.setCompoundDrawablesRelativeWithIntrinsicBounds(pin, null, null, null);
+        heading.setCompoundDrawablePadding(Math.round(8 * density));
         Button[] candidates = new Button[result.routes().size()];
+        ColorStateList[] defaultTints = new ColorStateList[candidates.length];
+        ColorStateList selectedTint = ColorStateList.valueOf(dark ? 0xff334e69 : 0xffdceaff);
+        ColorStateList darkUnselectedTint = ColorStateList.valueOf(0xff262a31);
         Button send = new Button(this);
         Button save = new Button(this);
         send.setEnabled(false);
@@ -154,9 +168,10 @@ public class MainActivity extends Activity {
             MapsRoutes.Route route = result.routes().get(i);
             candidates[i] = button(RouteMapView.number(i) + " " + route.label(), () -> {
                 for (int j = 0; j < candidates.length; j++) {
-                    candidates[j].setSelected(j == index);
-                    candidates[j].setBackgroundTintList(j == index
-                            ? ColorStateList.valueOf(dark ? 0xff293f58 : 0xffdceaff) : null);
+                    boolean selected = j == index;
+                    candidates[j].setSelected(selected);
+                    ColorStateList unselectedTint = dark ? darkUnselectedTint : defaultTints[j];
+                    candidates[j].setBackgroundTintList(selected ? selectedTint : unselectedTint);
                 }
                 map.select(index);
                 send.setText(RouteMapView.number(index) + " を GPX にして開く");
@@ -167,11 +182,20 @@ public class MainActivity extends Activity {
                 save.setOnClickListener(view -> createGpx(route, candidates, send, save, true));
             });
             candidates[i].setTextColor(RouteMapView.labelColor(i, dark));
+            defaultTints[i] = candidates[i].getBackgroundTintList();
+            if (i > 0) {
+                ((LinearLayout.LayoutParams) candidates[i].getLayoutParams()).topMargin = -gapAdjustment;
+            }
         }
-        int mapHeight = Math.round(260 * getResources().getDisplayMetrics().density);
-        content.addView(map, ViewGroup.LayoutParams.MATCH_PARENT, mapHeight);
+        LinearLayout.LayoutParams mapLayout = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.round(260 * density));
+        mapLayout.setMargins(buttonSideInset, gapAdjustment, buttonSideInset, gapAdjustment);
+        content.addView(map, mapLayout);
         content.addView(send, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        content.addView(save, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams saveLayout = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        saveLayout.topMargin = -gapAdjustment;
+        content.addView(save, saveLayout);
         if (candidates.length == 1) candidates[0].performClick();
     }
 
@@ -297,7 +321,7 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void screen(String title) {
+    private TextView screen(String title) {
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -308,6 +332,7 @@ public class MainActivity extends Activity {
         sizePopup();
         TextView heading = line(title);
         heading.setTextSize(24);
+        return heading;
     }
 
     private void sizePopup() {
